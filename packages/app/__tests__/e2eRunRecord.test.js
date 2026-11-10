@@ -396,7 +396,9 @@ describe('release-e2e-resources.sh scope', function () {
 
     const out = release(['--platform=android', '--slot=1', '--only=jet']);
 
-    expect(out).toMatch(/identity: slot-1 .*scope=recorded only/);
+    expect(out).toMatch(
+      /identity: slot-1 .*scope=recorded \(\+ identity-AVD this-checkout-unrecorded\)/,
+    );
     expect(out).toMatch(new RegExp(`SIGTERM :13010 pids=${ours.child.pid}\\b`));
     expect(out).not.toMatch(new RegExp(`pids=.*\\b${theirs.child.pid}\\b`));
     expect(await settle(ours.exited, 2000)).toBe('SIGTERM');
@@ -438,7 +440,7 @@ describe('release-e2e-resources.sh scope', function () {
 
     const out = release(['--platform=macos', '--slot=1', '--only=jet']);
 
-    expect(out).toMatch(/scope=recorded only/);
+    expect(out).toMatch(/scope=recorded \(\+ identity-AVD this-checkout-unrecorded\)/);
     expect(out).toMatch(new RegExp(`SIGTERM :13210 pids=${child.pid}\\b`));
     expect(await settle(exited, 2000)).toBe('SIGTERM');
   });
@@ -783,7 +785,35 @@ setTimeout(() => {}, 60000);`,
           `stop serial=emulator-16250 avd=TestingAVD-1 qemu=${qemuPid} \\(owner=this-checkout-unrecorded\\)`,
         ),
       );
+      expect(out.stdout + out.stderr).not.toMatch(/--include-unrecorded/);
       expect(await waitGone(qemuPid, 3000)).toBe(true);
+    });
+
+    it('check is BUSY for a FreePortFinder identity-AVD qemu; default --devices clears it', async function () {
+      const qemuPid = coldBoot('16250');
+      const result = check();
+      expect(result.status).toBe(1);
+      expect(result.stdout).toMatch(
+        new RegExp(
+          `BUSY\\s+android emulator emulator-16250 avd=TestingAVD-1 qemu pid=${qemuPid} cwd=${testsDir} owner=this-checkout-unrecorded — no run recorded it \\(e\\.g\\. cold-boot respawn\\); free with yarn tests:e2e:release --devices --slot=1`,
+        ),
+      );
+      // BUSY line names --devices; must not push --include-unrecorded for this category.
+      expect(result.stdout).not.toMatch(/include-unrecorded/);
+      expect(result.stderr).not.toMatch(/--include-unrecorded --only [^\n]*\bandroid-emulator\b/);
+      const out = runRelease(scoped);
+      expect(out.stdout).toMatch(
+        new RegExp(
+          `stop serial=emulator-16250 avd=TestingAVD-1 qemu=${qemuPid} \\(owner=this-checkout-unrecorded\\)`,
+        ),
+      );
+      expect(out.stdout + out.stderr).not.toMatch(/--include-unrecorded/);
+      expect(await waitGone(qemuPid, 3000)).toBe(true);
+      // Fake adb exit-0 makes app probes BUSY; assert the FreePortFinder qemu line is gone.
+      expect(check().stdout).not.toMatch(/emulator-16250/);
+      // check BUSY on this qemu is what makes release soft-kill miss → forceful round;
+      // the force path itself is covered by clear_android_emulator hard + existing
+      // stopQemuPids SIGTERM-ignore coverage below.
     });
 
     it('bootAndRecord re-records the cold-booted instance, so release --devices stops it', async function () {
@@ -829,9 +859,10 @@ setTimeout(() => {}, 60000);`,
           `BUSY\\s+android emulator emulator-5558 avd=TestingAVD-1 qemu pid=${qemuPid} cwd=${testsDir} owner=this-checkout-unrecorded — no run recorded it \\(e\\.g\\. cold-boot respawn\\); free with yarn tests:e2e:release --devices --slot=1`,
         ),
       );
-      expect(result.stderr).toMatch(
-        /owner=this-checkout-unrecorded:.*--only [\w,-]*android-emulator/,
-      );
+      // Default --devices frees this category; footer must not list android-emulator under
+      // --include-unrecorded (fake adb may still note android-apps separately).
+      expect(result.stdout).not.toMatch(/include-unrecorded/);
+      expect(result.stderr).not.toMatch(/--include-unrecorded --only [^\n]*\bandroid-emulator\b/);
       recordColdBoot('5558');
       // A live recorded instance is owned by the run record (release --devices frees it);
       // host-clear does not fail solely on a warm AVD the run still owns.
