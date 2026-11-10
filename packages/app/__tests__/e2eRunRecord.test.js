@@ -639,7 +639,7 @@ setTimeout(() => {}, 60000);`,
     }
   });
 
-  it('--include-unrecorded --devices stops only this checkout’s unrecorded emulator on the identity’s AVD', async function () {
+  it('default --devices stops this checkout’s unrecorded emulator on the identity’s AVD; never another owner’s', async function () {
     writeExecutable(path.join(dir, 'adb'), '#!/bin/bash\nexit 0\n');
     const own = startTokenProcessIn(
       repoRoot,
@@ -675,21 +675,18 @@ setTimeout(() => {}, 60000);`,
       });
     const scoped = ['--platform=android', '--slot=1', '--devices', '--only=android-emulator'];
 
-    run(scoped);
-    expect(await settle(own.exited, 300)).toBe('running');
-
-    const manual = run([...scoped, '--include-unrecorded']);
-    expect(manual.stdout).toMatch(
+    const out = run(scoped);
+    expect(out.stdout).toMatch(
       new RegExp(`qemu=${own.child.pid} \\(owner=this-checkout-unrecorded\\)`),
     );
     expect(await settle(own.exited, 2000)).toBe('SIGTERM');
-    expect(manual.stderr).toMatch(
+    expect(out.stderr).toMatch(
       new RegExp(
         `serial=emulator-16228 avd=TestingAVD-1 .*owner=unrecorded — not this checkout's, left running`,
       ),
     );
     expect(await settle(foreign.exited, 300)).toBe('running');
-    expect(manual.stdout).not.toMatch(/16230/);
+    expect(out.stdout).not.toMatch(/16230/);
     expect(await settle(otherIdentity.exited, 300)).toBe('running');
   });
 
@@ -778,15 +775,15 @@ setTimeout(() => {}, 60000);`,
       writeExecutable(path.join(dir, 'adb'), '#!/bin/bash\nexit 0\n');
     });
 
-    it('without a re-record, release --devices leaves the new emulator running but names it', async function () {
+    it('without a re-record, release --devices still stops this checkout’s cold-booted emulator', async function () {
       const qemuPid = coldBoot('16250');
       const out = runRelease(scoped);
-      expect(out.stderr).toMatch(
+      expect(out.stdout).toMatch(
         new RegExp(
-          `serial=emulator-16250 avd=TestingAVD-1 .*owner=this-checkout-unrecorded — runs from this checkout but no run recorded it, left running.*--include-unrecorded --devices --only android-emulator --slot=1`,
+          `stop serial=emulator-16250 avd=TestingAVD-1 qemu=${qemuPid} \\(owner=this-checkout-unrecorded\\)`,
         ),
       );
-      expect(await waitGone(qemuPid, 300)).toBe(false);
+      expect(await waitGone(qemuPid, 3000)).toBe(true);
     });
 
     it('bootAndRecord re-records the cold-booted instance, so release --devices stops it', async function () {
@@ -823,16 +820,21 @@ setTimeout(() => {}, 60000);`,
       expect(await waitGone(qemuPid, 3000)).toBe(true);
     });
 
-    it('check names an unrecorded emulator on the identity AVD at its allocated serial', function () {
+    it('check is BUSY for this checkout’s unrecorded emulator on the identity AVD at its allocated serial', function () {
       const qemuPid = coldBoot('5558');
       const result = check();
+      expect(result.status).toBe(1);
       expect(result.stdout).toMatch(
         new RegExp(
-          `INFO\\s+android emulator emulator-5558 avd=TestingAVD-1 qemu pid=${qemuPid} cwd=${testsDir} owner=this-checkout-unrecorded — no run recorded it, so release --devices leaves it running`,
+          `BUSY\\s+android emulator emulator-5558 avd=TestingAVD-1 qemu pid=${qemuPid} cwd=${testsDir} owner=this-checkout-unrecorded — no run recorded it \\(e\\.g\\. cold-boot respawn\\); free with yarn tests:e2e:release --devices --slot=1`,
         ),
       );
-      expect(result.stdout).not.toMatch(/BUSY\s+android emulator/);
+      expect(result.stderr).toMatch(
+        /owner=this-checkout-unrecorded:.*--only [\w,-]*android-emulator/,
+      );
       recordColdBoot('5558');
+      // A live recorded instance is owned by the run record (release --devices frees it);
+      // host-clear does not fail solely on a warm AVD the run still owns.
       expect(check().stdout).not.toMatch(/android emulator emulator-5558/);
     });
 
